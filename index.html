@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="J's Kakeibo">
+    
+    <!-- PWA用アイコン設定 -->
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2220%22 fill=%22%231e293b%22/><text y=%22.9em%22 x=%2250%25%22 font-size=%2260%22 text-anchor=%22middle%22 fill=%22white%22 font-family=%22sans-serif%22 font-weight=%22bold%22>J</text></svg>">
+    
+    <title>J's Kakeibo</title>
+    
+    <!-- Scripts -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <style>
+        * { -webkit-tap-highlight-color: transparent; outline: none; }
+        body { margin: 0; background-color: #f8fafc; font-family: sans-serif; }
+        
+        /* CSS自作スピナー（JSエラーを回避するため） */
+        .custom-spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #e2e8f0;
+            border-top: 4px solid #1e293b;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        input[type="date"]::-webkit-calendar-picker-indicator {
+            opacity: 0; position: absolute; width: 100%; height: 100%; cursor: pointer;
+        }
+    </style>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // 環境変数
+        const firebaseConfig = JSON.parse(window.__firebase_config || '{}');
+        const appId = window.__app_id || 'js-kakeibo-v1';
+        const apiKey = ""; 
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        const { useState, useEffect, useRef, createElement } = React;
+
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [activeTab, setActiveTab] = useState('home');
+            const [transactions, setTransactions] = useState([]);
+            const [isAnalyzing, setIsAnalyzing] = useState(false);
+            const [error, setError] = useState(null);
+            const camRef = useRef(null);
+            const [form, setForm] = useState({ date: new Date().toISOString().split('T')[0], item: '', amount: '', category: '食費', type: 'expense' });
+
+            const categories = ['食費', '日用品', '交際費', '交通費', '給与', '振替', 'その他'];
+            const categoryColors = { '食費': '#1e293b', '日用品': '#475569', '交際費': '#6366f1', '交通費': '#0f172a', '振替': '#94a3b8', 'その他': '#cbd5e1' };
+
+            useEffect(() => {
+                signInAnonymously(auth).catch(() => setError("Network Error"));
+                return onAuthStateChanged(auth, setUser);
+            }, []);
+
+            useEffect(() => {
+                if (!user) return;
+                const q = collection(db, 'artifacts', appId, 'users', user.uid, 'transactions');
+                return onSnapshot(q, (snap) => {
+                    setTransactions(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => new Date(b.date) - new Date(a.date)));
+                });
+            }, [user]);
+
+            const handleSave = async () => {
+                if (!user || !form.item || !form.amount) return;
+                try {
+                    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), {
+                        ...form, amount: Number(form.amount), createdAt: new Date().toISOString()
+                    });
+                    setForm({ date: new Date().toISOString().split('T')[0], item: '', amount: '', category: '食費', type: 'expense' });
+                } catch (e) { setError("Save Failed"); }
+            };
+
+            const onFile = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                setIsAnalyzing(true);
+                setError(null);
+                const reader = new FileReader();
+                reader.onload = async () => {
+                    try {
+                        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                contents: [{ parts: [{ text: "Extract receipt info to JSON (date, item, amount, category). Output ONLY JSON." }, { inlineData: { mimeType: file.type, data: reader.result.split(',')[1] } }] }],
+                                generationConfig: { responseMimeType: "application/json" }
+                            })
+                        });
+                        const json = await res.json();
+                        const d = JSON.parse(json.candidates[0].content.parts[0].text);
+                        setForm({ ...d, type: 'expense' });
+                    } catch (e) { setError("AI Analysis Failed"); }
+                    finally { setIsAnalyzing(false); }
+                };
+                reader.readAsDataURL(file);
+            };
+
+            // Lucideアイコンの初期化（描画後に行う）
+            useEffect(() => { 
+                if (window.lucide) {
+                    lucide.createIcons();
+                }
+            }, [activeTab, transactions, isAnalyzing, user]);
+
+            if (!user) return createElement('div', { className: "h-screen flex items-center justify-center bg-white" }, 
+                createElement('div', { className: "custom-spinner" })
+            );
+
+            const expSum = transactions.filter(t => t.category !== '振替' && t.type === 'expense').reduce((s, t) => s + Number(t.amount), 0);
+
+            return createElement('div', { className: "min-h-screen bg-slate-50 text-slate-800 pb-20" },
+                createElement('div', { className: "max-w-md mx-auto p-5 space-y-6" },
+                    // Header
+                    createElement('header', { className: "flex justify-between items-center py-4" },
+                        createElement('div', { className: "flex items-center gap-2" },
+                            createElement('div', { className: "bg-slate-900 p-2 rounded-xl shadow-lg" }, 
+                                createElement('i', { 'data-lucide': "wallet", className: "text-white w-5 h-5" })
+                            ),
+                            createElement('h1', { className: "font-black text-xl tracking-tighter" }, "J's Kakeibo")
+                        ),
+                        createElement('nav', { className: "flex bg-white rounded-xl border border-slate-100 p-1" },
+                            createElement('button', { onClick: () => setActiveTab('home'), className: `px-4 py-1.5 text-[10px] font-black rounded-lg transition-all ${activeTab === 'home' ? 'bg-slate-900 text-white shadow-lg' : 'text-slate-400'}` }, "HOME"),
+                            createElement('button', { onClick: () => setActiveTab('stats'), className: `px-4 py-1.5 text-[10px] font-black rounded-lg transition-all ${activeTab === 'stats' ? 'bg-slate-900 text-white' : 'text-slate-400'}` }, "STATS")
+                        )
+                    ),
+                    
+                    activeTab === 'home' ? [
+                        // Balance Card
+                        createElement('div', { key: 'bal', className: "bg-slate-900 text-white p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden" },
+                            createElement('p', { className: "text-[10px] font-bold opacity-30 uppercase tracking-widest mb-1" }, "Monthly Total"),
+                            createElement('p', { className: "text-4xl font-black" }, `¥${expSum.toLocaleString()}`),
+                            createElement('div', { className: "absolute top-[-30%] right-[-10%] w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl" })
+                        ),
+                        
+                        // Input Area
+                        createElement('section', { key: 'input', className: "bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm space-y-6 relative" },
+                            isAnalyzing && createElement('div', { className: "absolute inset-0 bg-white/90 z-20 flex flex-col items-center justify-center rounded-[2rem]" },
+                                createElement('div', { className: "custom-spinner mb-2" }),
+                                createElement('p', { className: "text-[10px] font-black text-slate-400" }, "ANALYZING...")
+                            ),
+                            createElement('div', { className: "flex justify-between items-center px-1" },
+                                createElement('span', { className: "text-[10px] font-black text-slate-300 uppercase tracking-widest" }, "Quick Entry"),
+                                createElement('div', { className: "flex gap-2" },
+                                    createElement('button', { onClick: () => camRef.current.click(), className: "p-3 bg-indigo-50 text-indigo-600 rounded-2xl" }, createElement('i', { 'data-lucide': "camera", className: "w-5 h-5" })),
+                                    createElement('label', { className: "p-3 bg-slate-50 text-slate-400 rounded-2xl cursor-pointer" }, 
+                                        createElement('i', { 'data-lucide': "upload", className: "w-5 h-5" }),
+                                        createElement('input', { type: "file", accept: "image/*,application/pdf", onChange: onFile, className: "hidden" })
+                                    )
+                                )
+                            ),
+                            createElement('input', { type: "file", accept: "image/*", capture: "environment", ref: camRef, onChange: (e) => onFile(e), className: "hidden" }),
+                            createElement('div', { className: "space-y-4" },
+                                createElement('div', { className: "grid grid-cols-2 gap-3" },
+                                    createElement('input', { type: "date", value: form.date, onChange: e => setForm({...form, date: e.target.value}), className: "bg-slate-50 p-3 rounded-2xl text-xs font-bold border-none outline-none" }),
+                                    createElement('select', { value: form.category, onChange: e => setForm({...form, category: e.target.value}), className: "bg-slate-50 p-3 rounded-2xl text-xs font-bold border-none outline-none" },
+                                        categories.map(c => createElement('option', { key: c, value: c }, c))
+                                    )
+                                ),
+                                createElement('input', { type: "text", placeholder: "買い物項目", value: form.item, onChange: e => setForm({...form, item: e.target.value}), className: "w-full bg-slate-50 p-4 rounded-2xl text-xs font-bold border-none outline-none" }),
+                                createElement('div', { className: "relative" },
+                                    createElement('span', { className: "absolute left-4 top-4 text-slate-300 font-bold" }, "¥"),
+                                    createElement('input', { type: "number", placeholder: "0", value: form.amount, onChange: e => setForm({...form, amount: e.target.value}), className: "w-full bg-slate-50 p-4 pl-9 rounded-2xl text-lg font-black border-none outline-none" })
+                                )
+                            ),
+                            createElement('button', { onClick: handleSave, className: "w-full bg-slate-900 text-white py-4 rounded-[1.5rem] font-black text-xs shadow-xl active:scale-95 transition-all" }, "記録を保存する")
+                        ),
+
+                        // History
+                        createElement('div', { key: 'history', className: "space-y-3" },
+                            createElement('h3', { className: "text-[10px] font-black text-slate-300 px-2 uppercase tracking-[0.3em]" }, "History"),
+                            transactions.slice(0, 10).map(t => createElement('div', { key: t.id, className: "bg-white p-5 rounded-[1.5rem] flex justify-between items-center border border-slate-100 shadow-sm" },
+                                createElement('div', { className: "flex items-center gap-4" },
+                                    createElement('div', { className: "w-1 h-10 rounded-full", style: { backgroundColor: categoryColors[t.category] || '#eee' } }),
+                                    createElement('div', null,
+                                        createElement('p', { className: "text-xs font-bold text-slate-800" }, t.item),
+                                        createElement('p', { className: "text-[9px] text-slate-400 font-bold uppercase" }, `${t.date} • ${t.category}`)
+                                    )
+                                ),
+                                createElement('div', { className: "flex items-center gap-4" },
+                                    createElement('p', { className: "text-sm font-black" }, `¥${Number(t.amount).toLocaleString()}`),
+                                    createElement('button', { onClick: () => deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', t.id)), className: "p-2 text-slate-200 active:text-rose-500" }, 
+                                        createElement('i', { 'data-lucide': "trash-2", className: "w-4 h-4" })
+                                    )
+                                )
+                            ))
+                        )
+                    ] : createElement('div', { className: "bg-white p-12 rounded-[3rem] text-center py-40" }, 
+                        createElement('p', { className: "text-[10px] font-black text-slate-300 uppercase tracking-widest" }, "Data Analysis Section")
+                    )
+                ),
+                error && createElement('div', { className: "fixed bottom-6 left-6 right-6 bg-slate-900 text-white p-4 rounded-2xl text-[10px] font-bold flex justify-between items-center shadow-2xl z-50 border border-white/10" },
+                    createElement('div', { className: "flex items-center gap-3" },
+                        createElement('i', { 'data-lucide': "alert-circle", className: "w-4 h-4 text-rose-500" }),
+                        createElement('span', null, error)
+                    ),
+                    createElement('button', { onClick: () => setError(null) }, createElement('i', { 'data-lucide': "x", className: "w-4 h-4 opacity-50" }))
+                )
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(createElement(App));
+    </script>
+</head>
+<body><div id="root"></div></body>
+</html>
