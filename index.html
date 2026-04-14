@@ -7,13 +7,13 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="J's Kakeibo">
     
-    <!-- ホーム画面用アイコン設定 -->
+    <!-- ホーム画面用アイコン：Vercel公開時にGeminiロゴになるのを防ぎ、財布アイコンを表示させます -->
     <link rel="apple-touch-icon" href="https://img.icons8.com/fluency/180/000000/wallet.png">
     <link rel="icon" type="image/png" href="https://img.icons8.com/fluency/48/000000/wallet.png">
     
     <title>J's Kakeibo</title>
     
-    <!-- Scripts -->
+    <!-- 必要なライブラリの読み込み -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -21,15 +21,16 @@
     
     <style>
         * { -webkit-tap-highlight-color: transparent; outline: none; }
-        body { margin: 0; background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; -webkit-user-select: none; }
+        body { margin: 0; background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; -webkit-user-select: none; }
         
-        /* CSSスピナー：JSエラー防止のため自作 */
+        /* カスタムスピナー：JavaScriptエラーを防ぐためCSSで自作 */
         .custom-spinner {
-            width: 40px; height: 40px; border: 4px solid #f1f5f9; border-top: 4px solid #0f172a;
+            width: 36px; height: 36px; border: 4px solid #f1f5f9; border-top: 4px solid #0f172a;
             border-radius: 50%; animation: spin 1s linear infinite;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         
+        /* iPhoneのデートピッカーの見た目を調整 */
         input[type="date"]::-webkit-calendar-picker-indicator {
             opacity: 0; position: absolute; width: 100%; height: 100%; cursor: pointer;
         }
@@ -56,49 +57,95 @@
             const categories = ['食費', '日用品', '交際費', '交通費', '給与', '振替', 'その他'];
             const categoryColors = { '食費': '#1e293b', '日用品': '#475569', '交際費': '#6366f1', '交通費': '#0f172a', '振替': '#94a3b8', 'その他': '#cbd5e1' };
 
-            // Firebase初期化（安全なガード付き）
+            // Firebaseの初期化とデータ同期
             useEffect(() => {
                 const init = async () => {
                     try {
                         const configStr = window.__firebase_config;
-                        if (!configStr || configStr === '{}') {
-                            console.warn("Firebase Config missing. Running in Demo Mode.");
-                            setIsReady(true);
-                            return;
+                        // Vercel環境でconfigがない場合はデモモードで起動（真っ白になるのを防ぐ）
+                        if (!configStr || configStr === '{}' || configStr === 'undefined') {
+                            setIsReady(true); return;
                         }
-                        
                         const config = JSON.parse(configStr);
                         const app = initializeApp(config);
                         const auth = getAuth(app);
                         const db = getFirestore(app);
                         window.db = db;
-
                         await signInAnonymously(auth);
-                        onAuthStateChanged(auth, (u) => {
-                            setUser(u);
-                            setIsReady(true);
-                        });
-
-                        const appId = window.__app_id || 'js-kakeibo-v1';
-                        const q = collection(db, 'artifacts', appId, 'users', auth.currentUser.uid, 'transactions');
-                        onSnapshot(q, (snap) => {
+                        onAuthStateChanged(auth, (u) => { setUser(u); setIsReady(true); });
+                        onSnapshot(collection(db, 'artifacts', window.__app_id || 'js-kakeibo-v1', 'users', auth.currentUser.uid, 'transactions'), (snap) => {
                             setTransactions(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => new Date(b.date) - new Date(a.date)));
                         });
-                    } catch (e) {
-                        console.error("Firebase Auth Error:", e);
-                        setIsReady(true);
-                    }
+                    } catch (e) { setIsReady(true); }
                 };
                 init();
             }, []);
 
-            // アイコンの自動反映
+            // Lucideアイコンの自動適用
             useEffect(() => { if (window.lucide) lucide.createIcons(); });
+
+            // 画像の自動圧縮：iPhoneの巨大な写真をAIが読みやすいサイズへ瞬時にリサイズ
+            const processFile = async (file) => {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.readAsDataURL(file);
+                    reader.onload = (e) => {
+                        if (file.type === "application/pdf") {
+                            resolve({ mimeType: file.type, data: e.target.result.split(',')[1] });
+                            return;
+                        }
+                        const img = new Image();
+                        img.src = e.target.result;
+                        img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            const MAX_WIDTH = 1200;
+                            let width = img.width, height = img.height;
+                            if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
+                            canvas.width = width; canvas.height = height;
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(img, 0, 0, width, height);
+                            resolve({ mimeType: "image/jpeg", data: canvas.toDataURL('image/jpeg', 0.8).split(',')[1] });
+                        };
+                    };
+                    reader.onerror = reject;
+                });
+            };
+
+            const onFileChange = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                setIsAnalyzing(true); setError(null);
+                
+                try {
+                    const apiKey = ""; // Runtime provides the key
+                    const fileData = await processFile(file);
+                    
+                    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{ parts: [
+                                { text: "あなたはプロの家計簿解析AIです。添付画像から「合計金額(amount:数値のみ)」「日付(date:YYYY-MM-DD)」「項目名(item:店名や購入内容)」を抽出してください。カテゴリー（食費,日用品,交際費,交通費,振替,その他）から最適なものを1つ選んでください。出力は以下のJSONのみで行い、余計な説明は不要です。\n{\"date\": \"YYYY-MM-DD\", \"item\": \"string\", \"amount\": number, \"category\": \"string\"}" },
+                                { inlineData: { mimeType: fileData.mimeType, data: fileData.data } }
+                            ] }],
+                            generationConfig: { responseMimeType: "application/json" }
+                        })
+                    });
+
+                    if (!res.ok) throw new Error("API通信エラー");
+                    const json = await res.json();
+                    const data = JSON.parse(json.candidates[0].content.parts[0].text);
+                    setForm({ ...data, type: 'expense' });
+                } catch (err) { 
+                    setError("読み取りに失敗しました。明るい場所で撮り直すか、画像を選択してください。"); 
+                } finally { 
+                    setIsAnalyzing(false); e.target.value = ''; 
+                }
+            };
 
             const handleSave = async () => {
                 if (!form.item || !form.amount) return;
                 if (!user) {
-                    // デモモード（保存されない）
                     setTransactions([{ id: Date.now(), ...form, amount: Number(form.amount) }, ...transactions]);
                     setForm({ date: new Date().toISOString().split('T')[0], item: '', amount: '', category: '食費', type: 'expense' });
                     return;
@@ -111,40 +158,7 @@
                 } catch (e) { setError("保存に失敗しました"); }
             };
 
-            const onFileChange = async (e) => {
-                const file = e.target.files[0];
-                if (!file) return;
-                setIsAnalyzing(true);
-                setError(null);
-                
-                const reader = new FileReader();
-                reader.onload = async () => {
-                    try {
-                        const apiKey = ""; // Gemini APIキー
-                        const base64 = reader.result.split(',')[1];
-                        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                contents: [{ parts: [{ text: "Extract receipt info to JSON (date, item, amount, category). Categories: 食費,日用品,交際費,交通費,振替,その他. Return ONLY JSON." }, { inlineData: { mimeType: file.type, data: base64 } }] }],
-                                generationConfig: { responseMimeType: "application/json" }
-                            })
-                        });
-                        if (!res.ok) throw new Error("API通信エラー");
-                        const json = await res.json();
-                        const data = JSON.parse(json.candidates[0].content.parts[0].text);
-                        setForm({ ...data, type: 'expense' });
-                    } catch (err) { 
-                        setError("AI解析に失敗しました。iCloudのファイルは、一度「写真」に保存してからアップロードすると安定します。"); 
-                    } finally { 
-                        setIsAnalyzing(false); 
-                        e.target.value = ''; 
-                    }
-                };
-                reader.readAsDataURL(file);
-            };
-
-            if (!isReady) return createElement('div', { className: "h-screen flex items-center justify-center bg-white" }, createElement('div', { className: "custom-spinner" }));
+            if (!isReady) return createElement('div', { className: "h-screen flex flex-col items-center justify-center bg-white gap-4" }, createElement('div', { className: "custom-spinner" }));
 
             const expSum = transactions.filter(t => t.category !== '振替' && t.type === 'expense').reduce((s, t) => s + Number(t.amount), 0);
 
@@ -155,26 +169,26 @@
                             createElement('div', { className: "bg-slate-900 p-2 rounded-xl shadow-lg" }, createElement('i', { 'data-lucide': "wallet", className: "text-white w-5 h-5" })),
                             createElement('h1', { className: "font-black text-xl tracking-tighter" }, "J's Kakeibo")
                         ),
-                        createElement('nav', { className: "flex bg-white rounded-xl border border-slate-100 p-1" },
+                        createElement('nav', { className: "flex bg-white rounded-xl border border-slate-100 p-1 shadow-sm" },
                             createElement('button', { onClick: () => setActiveTab('home'), className: `px-4 py-1.5 text-[10px] font-black rounded-lg transition-all ${activeTab === 'home' ? 'bg-slate-900 text-white' : 'text-slate-400'}` }, "HOME"),
                             createElement('button', { onClick: () => setActiveTab('stats'), className: `px-4 py-1.5 text-[10px] font-black rounded-lg transition-all ${activeTab === 'stats' ? 'bg-slate-900 text-white' : 'text-slate-400'}` }, "STATS")
                         )
                     ),
                     
                     activeTab === 'home' ? [
-                        createElement('div', { key: 'bal', className: "bg-slate-900 text-white p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden" },
+                        createElement('div', { key: 'sum', className: "bg-slate-900 text-white p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden" },
                             createElement('p', { className: "text-[10px] font-bold opacity-30 uppercase tracking-widest mb-1" }, "Monthly Total"),
                             createElement('p', { className: "text-4xl font-black" }, `¥${expSum.toLocaleString()}`),
                             createElement('div', { className: "absolute top-[-30%] right-[-10%] w-48 h-48 bg-indigo-500/20 rounded-full blur-3xl" })
                         ),
                         
-                        createElement('section', { key: 'input', className: "bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm space-y-6 relative" },
-                            isAnalyzing && createElement('div', { className: "absolute inset-0 bg-white/90 z-20 flex flex-col items-center justify-center rounded-[2rem]" },
+                        createElement('section', { className: "bg-white p-6 rounded-[2.2rem] border border-slate-100 shadow-sm space-y-6 relative" },
+                            isAnalyzing && createElement('div', { className: "absolute inset-0 bg-white/95 z-20 flex flex-col items-center justify-center rounded-[2.2rem] backdrop-blur-sm" },
                                 createElement('div', { className: "custom-spinner mb-2" }),
                                 createElement('p', { className: "text-[10px] font-black text-slate-400" }, "AI ANALYZING...")
                             ),
                             createElement('div', { className: "flex justify-between items-center px-1" },
-                                createElement('span', { className: "text-[10px] font-black text-slate-300 uppercase tracking-widest" }, "Quick Entry"),
+                                createElement('span', { className: "text-[10px] font-black text-slate-300 uppercase tracking-widest" }, "Smart Input"),
                                 createElement('div', { className: "flex gap-2" },
                                     createElement('button', { onClick: () => camRef.current.click(), className: "p-3 bg-indigo-50 text-indigo-600 rounded-2xl active:scale-95" }, createElement('i', { 'data-lucide': "camera", className: "w-5 h-5" })),
                                     createElement('button', { onClick: () => fileRef.current.click(), className: "p-3 bg-slate-50 text-slate-400 rounded-2xl active:scale-95" }, createElement('i', { 'data-lucide': "upload", className: "w-5 h-5" }))
@@ -182,6 +196,7 @@
                             ),
                             createElement('input', { type: "file", accept: "image/*", capture: "environment", ref: camRef, onChange: onFileChange, className: "hidden" }),
                             createElement('input', { type: "file", accept: "image/*,application/pdf", ref: fileRef, onChange: onFileChange, className: "hidden" }),
+                            
                             createElement('div', { className: "space-y-4" },
                                 createElement('div', { className: "grid grid-cols-2 gap-3" },
                                     createElement('input', { type: "date", value: form.date, onChange: e => setForm({...form, date: e.target.value}), className: "bg-slate-50 p-3 rounded-2xl text-xs font-bold border-none" }),
@@ -191,35 +206,36 @@
                                 ),
                                 createElement('input', { type: "text", placeholder: "買い物項目", value: form.item, onChange: e => setForm({...form, item: e.target.value}), className: "w-full bg-slate-50 p-4 rounded-2xl text-xs font-bold border-none" }),
                                 createElement('div', { className: "relative" },
-                                    React.createElement('span', { className: "absolute left-4 top-4 text-slate-300 font-bold" }, "¥"),
-                                    React.createElement('input', { type: "number", placeholder: "0", value: form.amount, onChange: e => setForm({...form, amount: e.target.value}), className: "w-full bg-slate-50 p-4 pl-9 rounded-2xl text-lg font-black border-none" })
+                                    createElement('span', { className: "absolute left-4 top-4 text-slate-300 font-bold" }, "¥"),
+                                    createElement('input', { type: "number", placeholder: "0", value: form.amount, onChange: e => setForm({...form, amount: e.target.value}), className: "w-full bg-slate-50 p-4 pl-9 rounded-2xl text-lg font-black border-none" })
                                 )
                             ),
-                            createElement('button', { onClick: handleSave, className: "w-full bg-slate-900 text-white py-4 rounded-[1.5rem] font-black text-xs shadow-xl active:scale-95 transition-all" }, "記録を保存する")
+                            createElement('button', { onClick: handleSave, className: "w-full bg-slate-900 text-white py-4 rounded-[1.5rem] font-black text-xs shadow-xl active:scale-95 transition-all" }, "家計簿を更新する")
                         ),
 
-                        createElement('div', { key: 'history', className: "space-y-3" },
+                        createElement('div', { className: "space-y-3" },
                             createElement('h3', { className: "text-[10px] font-black text-slate-300 px-2 uppercase tracking-[0.3em]" }, "History"),
                             transactions.map(t => createElement('div', { key: t.id, className: "bg-white p-5 rounded-[1.5rem] flex justify-between items-center border border-slate-100 shadow-sm" },
                                 createElement('div', { className: "flex items-center gap-4" },
                                     createElement('div', { className: "w-1 h-10 rounded-full", style: { backgroundColor: categoryColors[t.category] || '#eee' } }),
                                     createElement('div', null,
-                                        createElement('p', { className: "text-xs font-bold text-slate-800" }, t.item),
-                                        createElement('p', { className: "text-[9px] text-slate-400 font-bold uppercase" }, `${t.date} • ${t.category}`)
+                                        createElement('p', { className: "text-xs font-bold text-slate-800 leading-tight" }, t.item),
+                                        createElement('p', { className: "text-[9px] text-slate-400 font-bold uppercase mt-0.5" }, `${t.date} • ${t.category}`)
                                     )
                                 ),
                                 createElement('div', { className: "flex items-center gap-4" },
                                     createElement('p', { className: "text-sm font-black" }, `¥${Number(t.amount).toLocaleString()}`),
                                     createElement('button', { onClick: () => {
-                                        if (user) deleteDoc(doc(window.db, 'artifacts', window.__app_id || 'js-kakeibo-v1', 'users', user.uid, 'transactions', t.id));
+                                        if (window.db) deleteDoc(doc(window.db, 'artifacts', window.__app_id || 'js-kakeibo-v1', 'users', user.uid, 'transactions', t.id));
                                         else setTransactions(transactions.filter(x => x.id !== t.id));
                                     }, className: "p-2 text-slate-200" }, createElement('i', { 'data-lucide': "trash-2", className: "w-4 h-4" }))
                                 )
                             ))
                         )
-                    ] : createElement('div', { className: "bg-white p-10 rounded-[3rem] text-center py-20 flex flex-col items-center gap-4 mx-5" }, 
-                        createElement('p', { className: "text-xs font-bold text-slate-400 leading-relaxed" }, 
-                            "Vercel環境ではクラウド保存に自分のFirebase設定が必要です。Geminiプレビュー版ではそのまま保存可能です。"
+                    ] : createElement('div', { className: "bg-white p-12 rounded-[3rem] text-center py-40 flex flex-col items-center gap-4 mx-5 shadow-sm border border-slate-100" }, 
+                        createElement('i', { 'data-lucide': "bar-chart-3", className: "w-12 h-12 text-slate-100" }),
+                        createElement('p', { className: "text-[10px] font-black text-slate-300 uppercase tracking-widest leading-relaxed" }, 
+                            "Vercel環境ではクラウド保存に設定が必要です。Geminiプレビュー版ではそのまま保存可能です。"
                         )
                     )
                 ),
